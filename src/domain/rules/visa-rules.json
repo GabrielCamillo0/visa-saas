@@ -1,0 +1,36 @@
+{
+    "F-1": {
+    "purpose": ["estudar", "curso integral", "full-time"],
+    "requirements": [
+    "Aceite de escola SEVP (I-20)",
+    "Comprovação de fundos",
+    "Laços com país de origem"
+    ],
+    "links": [
+    "https://www.ice.gov/sevis/students",
+    "https://travel.state.gov/content/travel/en/us-visas/study/student-visa.html"
+    ]
+    },
+    "B-2": {
+    "purpose": ["turismo", "visita", "tratamento médico"],
+    "requirements": [
+    "Roteiro e duração limitada",
+    "Recursos financeiros",
+    "Laços com país de origem"
+    ],
+    "links": [
+    "https://travel.state.gov/content/travel/en/us-visas/tourism-visit/visitor.html"
+    ]
+    },
+    "H-1B": {
+    "purpose": ["trabalho especializado", "specialty occupation"],
+    "requirements": [
+    "Oferta de emprego nos EUA",
+    "Grau compatível",
+    "Patrocínio do empregador"
+    ],
+    "links": [
+    "https://www.uscis.gov/working-in-the-united-states/temporary-workers/h-1b-specialty-occupations"
+    ]
+    }
+    }

@@ -1,0 +1,41 @@
+{
+    "name": "visa-saas",
+    "private": true,
+    "version": "0.1.0",
+    "type": "module",
+    "scripts": {
+        "dev": "next dev",
+        "build": "next build",
+        "start": "next start",
+        "migrate": "tsx src/lib/db-migrate.ts",
+        "lint": "eslint .",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@aws-sdk/client-s3": "3.627.0",
+        "@aws-sdk/s3-request-presigner": "3.627.0",
+        "@react-pdf/renderer": "3.4.4",
+        "aws-sdk": "2.1570.0",
+        "dotenv": "^17.2.1",
+        "mime-types": "^3.0.1",
+        "next": "14.2.5",
+        "openai": "4.56.0",
+        "pg": "8.11.3",
+        "react": "18.2.0",
+        "react-dom": "18.2.0",
+        "stripe": "15.12.0",
+        "zod": "3.23.8",
+        "zod-to-json-schema": "^3.24.6"
+    },
+    "devDependencies": {
+        "@types/node": "20.11.30",
+        "@types/react": "18.2.48",
+        "@types/react-dom": "18.2.18",
+        "autoprefixer": "10.4.19",
+        "eslint": "8.57.0",
+        "postcss": "8.4.38",
+        "tailwindcss": "3.4.3",
+        "tsx": "4.7.1",
+        "typescript": "5.4.5"
+    }
+}

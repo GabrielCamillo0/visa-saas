@@ -1,0 +1,1 @@
+export type JSONLike = Record<string, any> | any[];

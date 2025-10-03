@@ -1,0 +1,16 @@
+# node
+node_modules
+.next
+out
+.docker
+.env
+.env.local
+
+
+# logs
+*.log
+
+
+# misc
+.DS_Store
+coverage

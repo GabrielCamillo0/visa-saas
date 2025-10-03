@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: visa_saas_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d visa_saas_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: dev-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000" # API S3
+      - "9001:9001" # Console Web
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-setup:
+    image: quay.io/minio/mc:latest
+    container_name: dev-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    # Cria alias, bucket, CORS e usuário 'appuser' com acesso restrito ao bucket
+    command: >
+      '
+      mc alias set local http://minio:9000 minio minio123 &&
+      mc mb --ignore-existing local/visa-saas-dev &&
+      printf "%s" "
+      [
+        {
+          \"AllowedOrigin\": [\"http://localhost:3000\", \"http://127.0.0.1:3000\"],
+          \"AllowedMethod\": [\"GET\",\"PUT\",\"POST\",\"HEAD\"],
+          \"AllowedHeader\": [\"*\"],
+          \"ExposeHeader\": [\"ETag\",\"x-amz-request-id\",\"x-amz-version-id\"],
+          \"MaxAgeSeconds\": 3000
+        }
+      ]" > /tmp/cors.json &&
+      mc anonymous set-json cors /tmp/cors.json local/visa-saas-dev &&
+      printf "%s" "
+      {
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {\"Effect\": \"Allow\", \"Action\": [\"s3:ListBucket\"], \"Resource\": [\"arn:aws:s3:::visa-saas-dev\"]},
+          {\"Effect\": \"Allow\", \"Action\": [\"s3:GetObject\",\"s3:PutObject\",\"s3:DeleteObject\"], \"Resource\": [\"arn:aws:s3:::visa-saas-dev/*\"]}
+        ]
+      }" > /tmp/policy.json &&
+      mc admin policy create local visa-saas-rw /tmp/policy.json || true &&
+      mc admin user add local appuser appsecret123 || true &&
+      mc admin policy attach local visa-saas-rw --user appuser || true &&
+      echo "✅ MinIO pronto: bucket visa-saas-dev + CORS + usuário appuser"
+      '
+    restart: "no"
+
+volumes:
+  pgdata:
+  minio_data:

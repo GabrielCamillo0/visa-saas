@@ -1,0 +1,1 @@
+Tarefa: gerar **exatamente 5** perguntas que reduzam incerteza sobre os `key_gaps` do candidato principal. Use `expected_type` apropriado e `choices` quando fizer sentido. Saída: **ValidationQuestions**.

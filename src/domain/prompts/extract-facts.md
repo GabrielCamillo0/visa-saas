@@ -1,0 +1,1 @@
+Tarefa: extrair fatos objetivos a partir do texto inicial e (se houver) OCR de anexos. Normalize datas/números, deduza campos óbvios e liste `documents_detected`. Saída: **ExtractFacts**.

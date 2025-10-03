@@ -1,0 +1,1 @@
+Tarefa: com base em `facts` e `visa-rules`, gere 1–3 candidatos com `confidence`, `why`, `key_requirements_matched` e `key_gaps`. Saída: **VisaCandidates**.

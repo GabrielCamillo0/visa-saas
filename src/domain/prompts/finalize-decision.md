@@ -1,0 +1,1 @@
+Tarefa: com `facts` + respostas, selecione `selected_visa`, `confidence`, `rationale`, `action_plan`, `documents_checklist` e possíveis `alternatives`. Seja conservador se confiança < 0.65. Saída: **FinalDecision**.

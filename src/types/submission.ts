@@ -1,0 +1,1 @@
+export type NewSubmissionPayload = { rawText?: string; fileUrls?: string[] };
