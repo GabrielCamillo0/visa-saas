@@ -15,6 +15,7 @@ export class AIError extends Error {
 
 /** Modelo default (pode sobrepor via parâmetro) */
 function defaultModel(): string {
+  // Use gpt-5-chat por padrão
   return process.env.OPENAI_MODEL || "gpt-5";
 }
 
@@ -37,6 +38,12 @@ function isRetryable(code?: number | string): boolean {
   );
 }
 
+/** Alguns modelos (ex.: gpt-5*) NÃO aceitam temperature/top_p/seed */
+function supportsSamplingParams(model: string): boolean {
+  // Todos modelos gpt-5 ou gpt-5-* (inclui gpt-5, gpt-5-chat) não aceitam ajustes finos
+  return !/^gpt-5(\b|[-_])/.test(model);
+}
+
 let client: OpenAI | null = null;
 function getClient(): OpenAI {
   if (process.env.AI_MOCK === "1") {
@@ -52,10 +59,10 @@ function getClient(): OpenAI {
 type CallJSONOptions<TOut> = {
   system: string;
   user: unknown;               // string ou objeto
-  model?: string;              // padrão: OPENAI_MODEL ou "gpt-4o-mini"
-  temperature?: number;        // padrão: 0.2
-  top_p?: number;              // default undefined
-  seed?: number;               // quando suportado (Responses API)
+  model?: string;              // padrão: OPENAI_MODEL ou "gpt-5-chat"
+  temperature?: number;        // padrão: 0.2 (ignorado em gpt-5*)
+  top_p?: number;              // ignorado em gpt-5*
+  seed?: number;               // ignorado em gpt-5*
   timeoutMs?: number;          // padrão: 60_000
   maxRetries?: number;         // padrão: 2 tentativas (total 3)
   validate?: (data: unknown) => TOut; // ex.: zod.parse
@@ -69,12 +76,16 @@ type CallJSONOptions<TOut> = {
  * - Sem “regex” para salvar JSON quebrado
  * - Com timeout + retries (apenas erros transitórios)
  * - Validação opcional (ex.: Zod)
+ * - Evita parâmetros proibidos em gpt-5* (temperature/top_p/seed)
+ * - Se API retornar 'unsupported_value', refaz a chamada removendo parâmetros
  */
 export async function callJSON<T = unknown>(opts: CallJSONOptions<T>): Promise<T> {
   const model       = opts.model ?? defaultModel();
-  const temperature = opts.temperature ?? 0.2;
-  const top_p       = opts.top_p;
-  const seed        = opts.seed;
+  const samplingOK  = supportsSamplingParams(model);
+  const temperature = samplingOK ? (opts.temperature ?? 0.2) : undefined;
+  const top_p       = samplingOK ? opts.top_p : undefined;
+  const seed        = samplingOK ? opts.seed : undefined;
+  const DEFAULT_AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS ?? 120_000);
   const timeoutMs   = opts.timeoutMs ?? 60_000;
   const maxRetries  = Math.max(0, opts.maxRetries ?? 2);
   const verbose     = opts.verboseLog ?? process.env.NODE_ENV !== "production";
@@ -90,89 +101,174 @@ export async function callJSON<T = unknown>(opts: CallJSONOptions<T>): Promise<T
     },
   ];
 
+  type CreationParams = {
+    model: string;
+    input?: any;
+    messages?: any;
+    temperature?: number;
+    top_p?: number;
+    seed?: number;
+    response_format?: { type: "json_object" };
+  };
+
+  // Monta o corpo para Responses API
+  const buildResponsesBody = (stripSampling = false): CreationParams => {
+    const body: CreationParams = {
+      model,
+      input: messages,
+    };
+    if (!stripSampling && samplingOK) {
+      if (typeof temperature === "number") body.temperature = temperature;
+      if (typeof top_p === "number") body.top_p = top_p;
+      if (typeof seed === "number") body.seed = seed;
+    }
+    // Alguns SDKs aceitam response_format aqui, outros não — se causar erro, o catch cuidará.
+    // body.response_format = { type: "json_object" };
+    return body;
+  };
+
+  // Monta o corpo para Chat Completions
+  const buildChatBody = (stripSampling = false): CreationParams => {
+    const body: CreationParams = {
+      model,
+      messages,
+      response_format: { type: "json_object" },
+    };
+    if (!stripSampling && samplingOK) {
+      if (typeof temperature === "number") body.temperature = temperature;
+      if (typeof top_p === "number") body.top_p = top_p;
+      // seed não é amplamente suportado em chat; omitimos por padrão
+    }
+    return body;
+  };
+
   // Real call (Responses API preferida; Chat como fallback)
   const doCall = async (signal?: AbortSignal): Promise<T> => {
-    // Responses API
+    // ====== Responses API ======
     if (cli?.responses?.create) {
-      // ⚠️ 'signal' vai no SEGUNDO argumento (options), não dentro do body
-      const res = await cli.responses.create(
-        {
-          model,
-          temperature,
-          ...(typeof top_p === "number" ? { top_p } : {}),
-          ...(typeof seed === "number" ? { seed } : {}),
-          input: messages,
-          // Se seu SDK suportar schema/response_format para JSON:
-          // response_format: { type: "json_object" },
-        },
-        { signal } // ✅ aqui!
-      );
-
-      const outText: string =
-        res.output_text ??
-        (Array.isArray(res.output)
-          ? res.output
-              .flatMap((o: any) => (o?.content || []).map((c: any) => c?.text?.value).filter(Boolean))
-              .join("\n")
-          : "");
-
-      if (!outText || typeof outText !== "string") {
-        throw new AIError("Resposta vazia/inesperada da OpenAI (Responses API).", "EMPTY_OUTPUT");
-      }
-
-      let parsed: unknown;
+      // 1ª tentativa com os parâmetros calculados
       try {
-        parsed = JSON.parse(outText);
-      } catch (e) {
-        if (verbose) console.error("INVALID_JSON_OUTPUT (Responses):", clipForLog(outText));
-        throw new AIError("Modelo retornou JSON inválido.", "INVALID_JSON", e);
-      }
+        const res = await cli.responses.create(buildResponsesBody(false), { signal });
+        const outText: string =
+          res.output_text ??
+          (Array.isArray(res.output)
+            ? res.output
+                .flatMap((o: any) => (o?.content || []).map((c: any) => c?.text?.value).filter(Boolean))
+                .join("\n")
+            : "");
 
-      if (opts.validate) {
-        try {
-          return opts.validate(parsed);
-        } catch (e) {
-          throw new AIError("Falha de validação do payload da IA.", "VALIDATION_ERROR", e);
+        if (!outText || typeof outText !== "string") {
+          throw new AIError("Resposta vazia/inesperada da OpenAI (Responses API).", "EMPTY_OUTPUT");
         }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(outText);
+        } catch (e) {
+          if (verbose) console.error("INVALID_JSON_OUTPUT (Responses):", clipForLog(outText));
+          throw new AIError("Modelo retornou JSON inválido.", "INVALID_JSON", e);
+        }
+
+        if (opts.validate) {
+          try {
+            return opts.validate(parsed);
+          } catch (e) {
+            throw new AIError("Falha de validação do payload da IA.", "VALIDATION_ERROR", e);
+          }
+        }
+        return parsed as T;
+      } catch (err: any) {
+        const code = err?.code || err?.status || err?.error?.code;
+        // Se for erro de parâmetro não suportado (ex.: temperature/top_p em gpt-5), refaça sem sampling
+        if (code === "unsupported_value" || /Unsupported value/i.test(err?.message || "")) {
+          if (verbose) console.warn("[AI] Retrying Responses API without sampling params due to unsupported_value.");
+          const res2 = await cli.responses.create(buildResponsesBody(true), { signal });
+          const outText2: string =
+            res2.output_text ??
+            (Array.isArray(res2.output)
+              ? res2.output
+                  .flatMap((o: any) => (o?.content || []).map((c: any) => c?.text?.value).filter(Boolean))
+                  .join("\n")
+              : "");
+
+          if (!outText2 || typeof outText2 !== "string") {
+            throw new AIError("Resposta vazia/inesperada da OpenAI (Responses API, retry).", "EMPTY_OUTPUT");
+          }
+
+          let parsed2: unknown;
+          try {
+            parsed2 = JSON.parse(outText2);
+          } catch (e) {
+            if (verbose) console.error("INVALID_JSON_OUTPUT (Responses, retry):", clipForLog(outText2));
+            throw new AIError("Modelo retornou JSON inválido (retry).", "INVALID_JSON", e);
+          }
+
+          if (opts.validate) {
+            try {
+              return opts.validate(parsed2);
+            } catch (e) {
+              throw new AIError("Falha de validação do payload da IA (retry).", "VALIDATION_ERROR", e);
+            }
+          }
+          return parsed2 as T;
+        }
+        // Caso não seja unsupported_value, propaga pro loop de retry
+        throw err;
       }
-      return parsed as T;
     }
 
-    // Chat Completions (fallback)
+    // ====== Chat Completions (fallback) ======
     if (cli?.chat?.completions?.create) {
-      const res = await cli.chat.completions.create(
-        {
-          model,
-          temperature,
-          ...(typeof top_p === "number" ? { top_p } : {}),
-          response_format: { type: "json_object" },
-          messages,
-        },
-        { signal } // ✅ aqui também!
-      );
-
-      const content: unknown = res?.choices?.[0]?.message?.content;
-      const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
-      if (!text) {
-        throw new AIError("Resposta vazia/inesperada da OpenAI (Chat Completions).", "EMPTY_OUTPUT");
-      }
-
-      let parsed: unknown;
       try {
-        parsed = JSON.parse(text);
-      } catch (e) {
-        if (verbose) console.error("INVALID_JSON_OUTPUT (Chat):", clipForLog(text));
-        throw new AIError("Modelo retornou JSON inválido.", "INVALID_JSON", e);
-      }
+        const res = await cli.chat.completions.create(buildChatBody(false) as any, { signal });
+        const content: unknown = res?.choices?.[0]?.message?.content;
+        const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
+        if (!text) throw new AIError("Resposta vazia/inesperada da OpenAI (Chat Completions).", "EMPTY_OUTPUT");
 
-      if (opts.validate) {
+        let parsed: unknown;
         try {
-          return opts.validate(parsed);
+          parsed = JSON.parse(text);
         } catch (e) {
-          throw new AIError("Falha de validação do payload da IA.", "VALIDATION_ERROR", e);
+          if (verbose) console.error("INVALID_JSON_OUTPUT (Chat):", clipForLog(text));
+          throw new AIError("Modelo retornou JSON inválido.", "INVALID_JSON", e);
         }
+
+        if (opts.validate) {
+          try {
+            return opts.validate(parsed);
+          } catch (e) {
+            throw new AIError("Falha de validação do payload da IA.", "VALIDATION_ERROR", e);
+          }
+        }
+        return parsed as T;
+      } catch (err: any) {
+        const code = err?.code || err?.status || err?.error?.code;
+        if (code === "unsupported_value" || /Unsupported value/i.test(err?.message || "")) {
+          if (verbose) console.warn("[AI] Retrying Chat API without sampling params due to unsupported_value.");
+          const res2 = await cli.chat.completions.create(buildChatBody(true) as any, { signal });
+          const content2: unknown = res2?.choices?.[0]?.message?.content;
+          const text2 = typeof content2 === "string" ? content2 : JSON.stringify(content2 ?? "");
+          if (!text2) throw new AIError("Resposta vazia/inesperada da OpenAI (Chat Completions, retry).", "EMPTY_OUTPUT");
+
+          let parsed2: unknown;
+          try {
+            parsed2 = JSON.parse(text2);
+          } catch (e) {
+            if (verbose) console.error("INVALID_JSON_OUTPUT (Chat, retry):", clipForLog(text2));
+            throw new AIError("Modelo retornou JSON inválido (retry).", "INVALID_JSON", e);
+          }
+
+          if (opts.validate) {
+            try {
+              return opts.validate(parsed2);
+            } catch (e) {
+              throw new AIError("Falha de validação do payload da IA (retry).", "VALIDATION_ERROR", e);
+            }
+          }
+          return parsed2 as T;
+        }
+        throw err;
       }
-      return parsed as T;
     }
 
     throw new AIError("SDK OpenAI sem Responses e sem Chat Completions disponíveis.", "NO_API_METHOD");
@@ -189,7 +285,7 @@ export async function callJSON<T = unknown>(opts: CallJSONOptions<T>): Promise<T
     try {
       if (verbose) {
         console.info(
-          `[AI] callJSON attempt=${attempt} model=${model} temp=${temperature} seed=${seed ?? "-"}\n` +
+          `[AI] callJSON attempt=${attempt} model=${model} temp=${samplingOK ? (opts.temperature ?? 0.2) : "-"} seed=${samplingOK ? (opts.seed ?? "-") : "-"}\n` +
           `system=${clipForLog(opts.system, 500)}\n` +
           `user=${clipForLog(opts.user, 1000)}`
         );
@@ -209,7 +305,8 @@ export async function callJSON<T = unknown>(opts: CallJSONOptions<T>): Promise<T
         e?.error?.code ||
         (e?.cause && (e.cause.code || e.cause?.status));
 
-      const asAI = e instanceof AIError ? e : new AIError(String(e?.message || e), String(code), e);
+      const asAI =
+        e instanceof AIError ? e : new AIError(String(e?.message || e), String(code), e);
 
       if (verbose) {
         console.error(
@@ -223,7 +320,8 @@ export async function callJSON<T = unknown>(opts: CallJSONOptions<T>): Promise<T
         asAI.code === "VALIDATION_ERROR" ||
         asAI.code === "NO_API_KEY" ||
         asAI.code === "AI_MOCK_ACTIVE" ||
-        asAI.code === "NO_API_METHOD"
+        asAI.code === "NO_API_METHOD" ||
+        asAI.code === "unsupported_value" // já lidamos internamente — se sobrou, não retry
       ) {
         throw asAI;
       }
