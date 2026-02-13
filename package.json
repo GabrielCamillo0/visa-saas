@@ -10,7 +10,9 @@
         "start": "next start",
         "migrate": "tsx src/lib/db-migrate.ts",
         "lint": "eslint .",
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc --noEmit",
+        "deploy": "vercel --prod",
+        "deploy:preview": "vercel"
     },
     "dependencies": {
         "@aws-sdk/client-s3": "3.627.0",
