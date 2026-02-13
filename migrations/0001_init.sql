@@ -58,3 +58,9 @@ ocr_text TEXT,
 meta JSONB,
 created_at timestamptz NOT NULL DEFAULT now()
 );
+
+create table if not exists profiles (
+  id text primary key, -- supabase auth user id (uuid string)
+  email text,
+  created_at timestamptz not null default now()
+);

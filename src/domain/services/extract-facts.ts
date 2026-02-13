@@ -23,50 +23,31 @@ export async function extractFacts(rawText: string | null | undefined): Promise<
   const hint = hardInferPurpose(text); // "immigration" | "study" | "work" | "business" | "tourism" | undefined
 
   const system = [
-    "Você é um extrator de fatos para elegibilidade de vistos dos EUA.",
-    "Responda APENAS em JSON válido, sem explicações nem texto fora do objeto.",
-    "Formato OBRIGATÓRIO do objeto:",
-    "{",
-    '  "personal": { "full_name": string?, "nationality": string?, "date_of_birth": string? },',
-    '  "purpose": "study" | "work" | "business" | "tourism" | "immigration",',
-    '  "education": string?,',
-    '  "work_experience_years": number?,',
-    '  "has_us_sponsor": boolean?,',
-    '  "signals": {',
-    '     "field_of_expertise": string?,',
-    '     "has_job_offer": boolean?,',
-    '     "job_offer_details": { "position": string?, "industry": string?, "salary_usd_year": number?, "employer_size": string?, "is_multinational": boolean? }?,',
-    '     "extraordinary_evidence": { "awards": string[]?, "media_mentions": number?, "conference_speaking": boolean?, "peer_review_jury": boolean?, "original_contributions": string? }?,',
-    '     "niw_prongs": { "national_importance": string?, "well_positioned": string?, "benefit_outweighs_labor_cert": string? }?,',
-    '     "perm_readiness": { "occupation": string?, "degree_requirement": string?, "prevailing_wage_level": string? }?,',
-    '     "chargeability_country": string?,',
-    '     "treaty_eligible": { "e1": boolean?, "e2": boolean? }?,',
-    '     "investment_capacity_usd": number?,',
-    '     "multinational_experience_years": number?,',
-    '     "portfolio_links": string[]?,',
-    '     "english_level": string?,',
-    '     "travel_history": string[]?,',
-    '     "immigration_history": { "overstay_or_violations": boolean?, "prior_us_visas": string[]? }?,',
-    '     "family_ties_us": { "immediate_relative_us_citizen": boolean? }?,',
-    '     "entrepreneurship": { "owns_business": boolean?, "business_details": string? }?',
-    "  }?",
-    "}",
-    "Regras IMPORTANTES:",
-    '- O campo "purpose" deve ser um entre: "study" | "work" | "business" | "tourism" | "immigration".',
-    "- Nunca use null; se não souber, omita o campo.",
-    "- Números devem ser número JSON; booleanos devem ser boolean JSON.",
-    "- Não assuma 'tourism' por omissão; só use se o texto indicar lazer/visita.",
+    "Você é um extrator de fatos para elegibilidade de vistos dos EUA. Sua saída é usada para classificar vistos e gerar perguntas de validação.",
+    "",
+    "REGRAS DE EXTRAÇÃO (obrigatórias):",
+    "1. Extraia APENAS o que está explícito ou claramente implícito no texto. Não invente nem assuma dados.",
+    "2. Se um dado não aparecer no texto, OMITA o campo (não use null nem string vazia).",
+    "3. purpose é OBRIGATÓRIO: escolha UM entre study | work | business | tourism | immigration com base no objetivo principal do candidato.",
+    "4. Números: use tipo number (ex.: work_experience_years, salary_usd_year). Anos de experiência: extraia de frases como 'X anos', 'desde 20XX'.",
+    "5. Booleanos: use true/false só quando o texto afirmar ou negar claramente (ex.: 'tem oferta de emprego' → has_job_offer: true).",
+    "6. Datas e nomes: mantenha no formato em que aparecem (ex.: date_of_birth como string).",
+    "7. Responda APENAS com um único objeto JSON válido, sem texto antes ou depois.",
+    "",
+    "FORMATO DO OBJETO (campos opcionais; omita os que não aplicar):",
+    '{"personal":{"full_name":"...","nationality":"...","date_of_birth":"..."},"purpose":"study|work|business|tourism|immigration","education":"...","work_experience_years":N,"has_us_sponsor":true|false,"signals":{"field_of_expertise":"...","has_job_offer":true|false,"job_offer_details":{"position":"...","industry":"...","salary_usd_year":N,"employer_size":"...","is_multinational":true|false},"extraordinary_evidence":{"awards":["..."],"media_mentions":N,"conference_speaking":true|false,"peer_review_jury":true|false,"original_contributions":"..."},"niw_prongs":{"national_importance":"...","well_positioned":"...","benefit_outweighs_labor_cert":"..."},"perm_readiness":{"occupation":"...","degree_requirement":"...","prevailing_wage_level":"..."},"chargeability_country":"...","treaty_eligible":{"e1":true|false,"e2":true|false},"investment_capacity_usd":N,"multinational_experience_years":N,"portfolio_links":["..."],"english_level":"...","travel_history":["..."],"immigration_history":{"overstay_or_violations":true|false,"prior_us_visas":["..."]},"family_ties_us":{"immediate_relative_us_citizen":true|false},"entrepreneurship":{"owns_business":true|false,"business_details":"..."}}}',
+    "",
+    "DICAS: nationality = país do passaporte/cidadania; chargeability_country = país para cota (DV/emprego); treaty_eligible = país com tratado E-1/E-2. Não assuma tourism se o texto falar em trabalho ou estudo.",
   ].join("\n");
 
   const user = {
-    raw_text: text,
-    purpose_hint: hint ?? null, // dica não-obrigatória
-    goal: "Extrair fatos objetivos e sinais relevantes para classificação de visto.",
+    raw_text: text.slice(0, 24000), // limita tamanho para evitar token excessivo e manter foco
+    purpose_hint: hint ?? null,
+    instruction: "Extraia todos os fatos relevantes para visto que encontrar no texto acima. Retorne somente o objeto JSON.",
   };
 
-  // 3) Chamada ao modelo (evita temperature em gpt-5*, que ignora/erra esse parâmetro)
   const model = process.env.OPENAI_MODEL || "gpt-5";
-  const temperature = model.startsWith("gpt-5") ? undefined : 0.2;
+  const temperature = model.startsWith("gpt-5") ? undefined : 0.15; // mais determinístico para extração
 
   const raw = await callJSON<unknown>({
     system,

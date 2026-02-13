@@ -1,6 +1,7 @@
 // src/app/api/submissions/[id]/redo/route.ts
 import { NextResponse } from "next/server";
 import { withTx } from "@/lib/db";
+import { getUserId } from "@/lib/auth";
 import { extractFacts } from "@/domain/services/extract-facts";
 import { classifyVisa } from "@/domain/services/classify-visa";
 import { generateValidationQuestions } from "@/domain/services/generate-questions";
@@ -26,6 +27,11 @@ type SubRow = {
 export async function POST(req: Request, { params }: { params: { id: string } }) {
   const id = params.id;
 
+  const userId = await getUserId(req);
+  if (!userId) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
   const body = await req.json().catch(() => ({}));
   const step = body?.step as Step | undefined;
 
@@ -38,13 +44,13 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
   try {
     const submission = await withTx(async (client: any) => {
-      // 1) Lock do submission
+      // 1) Lock do submission (apenas do dono)
       const res = await client.query(
         `SELECT id, raw_text, extracted_facts, classification, followup_questions, followup_answers, final_decision
            FROM submissions
-          WHERE id = $1
+          WHERE id = $1 AND user_id = $2
           FOR UPDATE`,
-        [id]
+        [id, userId]
       );
       if (res.rowCount === 0) throw new Error("submission não encontrado");
       const sub: SubRow = res.rows[0];

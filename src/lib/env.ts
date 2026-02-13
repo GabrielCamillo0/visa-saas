@@ -15,6 +15,12 @@ const optionalSchema = z.object({
   NEXT_PUBLIC_STRIPE_PRICE_PRO: z.string().optional(),
   NEXT_PUBLIC_APP_URL: z.string().optional(),
 
+  LEMONSQUEEZY_API_KEY: z.string().optional(),
+  LEMONSQUEEZY_STORE_ID: z.string().optional(),
+  LEMONSQUEEZY_SIGNING_SECRET: z.string().optional(),
+  LEMONSQUEEZY_VARIANT_ID: z.string().optional(),
+  NEXT_PUBLIC_LEMONSQUEEZY_VARIANT_ID: z.string().optional(),
+
   S3_ENDPOINT: z.string().optional(),
   S3_BUCKET: z.string().optional(),
   S3_REGION: z.string().optional(),

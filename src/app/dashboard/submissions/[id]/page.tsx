@@ -1,7 +1,8 @@
 // app/dashboard/submissions/[id]/page.tsx  (SERVER)
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import JSONBlock from "./_JSONBlock";
+import { getCurrentUser } from "@/lib/auth";
+import { query } from "@/lib/db";
 import QuestionsForm from "@/components/QuestionsForm";
 import PipelineButtons from "./_PipelineButtons";
 import FinalizeButton from "./_FinalizeButton";
@@ -39,7 +40,9 @@ function extractAnswers(input: unknown): string[] {
 type Submission = {
   id: string;
   status: string;
-  raw_text: string | null;
+  applicant_name?: string | null;
+  applicant_phone?: string | null;
+  created_at?: string;
   extracted_facts?: any | null;
   classification?: {
     candidates: Array<{
@@ -55,8 +58,11 @@ type Submission = {
     selected_visa: string;
     confidence: number;
     rationale?: string;
+    qualifies_for_visa?: boolean;
+    path_to_qualify?: { summary: string; steps: Array<string | { step: string; url?: string }> };
+    top_visas?: Array<{ visa: string; confidence: number; rationale?: string }>;
     alternatives?: string[];
-    action_plan: string[];
+    action_plan: Array<string | { step: string; url?: string }>;
     documents_checklist: string[];
     risks_and_flags?: string[];
     suggested_timeline?: string;
@@ -64,18 +70,36 @@ type Submission = {
   } | null;
 };
 
-// ---- Data loader -----------------------------------------------------------
+// ---- Data loader (server-side: usa cookies do request, evita 401 na API) ----
 
-async function getSubmission(id: string): Promise<Submission | null> {
-  const base =
-    process.env.NEXT_PUBLIC_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    ""; // se vazio, usa caminho relativo
+async function getSubmission(
+  id: string
+): Promise<Submission | null> {
+  const user = await getCurrentUser();
+  if (!user) return null;
 
-  const url = base ? `${base}/api/submissions/${id}` : `/api/submissions/${id}`;
-  const res = await fetch(url, { cache: "no-store", next: { revalidate: 0 } });
-  if (!res.ok) return null;
-  return res.json();
+  const rows = await query<Submission>(
+    `
+    SELECT
+      id,
+      status,
+      applicant_name,
+      applicant_phone,
+      created_at,
+      extracted_facts,
+      classification,
+      followup_questions,
+      followup_answers,
+      final_decision,
+      created_at,
+      updated_at
+    FROM submissions
+    WHERE id = $1 AND user_id = $2
+    LIMIT 1
+    `,
+    [id, user.id]
+  );
+  return rows[0] ?? null;
 }
 
 // ---- Page ------------------------------------------------------------------
@@ -102,114 +126,85 @@ export default async function SubmissionPage({
   const hasFinal = !!sub.final_decision;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 p-4">
-      <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Submission #{sub.id}</h1>
-        <nav className="text-sm">
-          <Link href="/dashboard" className="underline">
+    <div className="space-y-6">
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-[var(--text-main)]">{sub.applicant_name || `Submissão #${sub.id.slice(0, 8)}`}</h1>
+          {sub.created_at && (
+            <p className="text-sm text-[var(--text-subtle)] mt-0.5">
+              Criada em {new Date(sub.created_at).toLocaleDateString("pt-BR")} às {new Date(sub.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+            </p>
+          )}
+        </div>
+        <nav className="flex gap-3 text-sm">
+          <Link href="/dashboard" className="text-[var(--primary)] hover:underline">
             Submissões
           </Link>
-          <Link href="/dashboard/submissions/new" className="underline ml-3">
+          <Link href="/dashboard/submissions/new" className="text-[var(--primary)] hover:underline">
             Nova
           </Link>
         </nav>
       </header>
 
-      <section className="border rounded-md p-4">
-        <div className="text-sm text-gray-600">
-          Status: <b>{sub.status}</b>
+      <section className="section-card">
+        <div className="text-sm text-[var(--text-muted)]">
+          Status: <b className="text-[var(--text-main)]">{sub.status}</b>
         </div>
-        {sub.raw_text && (
-          <details className="mt-2">
-            <summary className="cursor-pointer text-sm underline">
-              Ver texto enviado
-            </summary>
-            <pre className="mt-2 whitespace-pre-wrap text-sm bg-gray-50 p-3 rounded">
-              {sub.raw_text}
-            </pre>
-          </details>
-        )}
       </section>
 
-      {/* Ações do pipeline (client component separado) */}
+      {/* Ações do pipeline (extração de fatos é automática; só classificar e perguntas são acionáveis) */}
       <PipelineButtons id={sub.id} />
 
-      {/* Fatos extraídos */}
-      <section className="border rounded-md p-4">
-        <h2 className="font-medium mb-2">1) Fatos extraídos</h2>
-        {hasFacts ? (
-          <JSONBlock data={sub.extracted_facts} />
-        ) : (
-          <p className="text-sm text-gray-600">
-            Ainda não há fatos. Clique em <b>Extrair fatos</b>.
-          </p>
-        )}
-      </section>
-
       {/* Classificação */}
-      <section className="border rounded-md p-4">
-        <h2 className="font-medium mb-2">2) Classificação (vistos candidatos)</h2>
+      <section className="section-card">
+        <h2 className="font-medium mb-3 text-[var(--text-main)]">1) Classificação (vistos candidatos)</h2>
         {hasClassification ? (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {sub.classification!.candidates.map((c, i) => (
-              <div key={i} className="border rounded p-3">
-                <div className="font-medium">
+              <div key={i} className="rounded-lg border border-[var(--border-default)] p-3 bg-[var(--bg-muted)]/50">
+                <div className="font-medium text-[var(--text-main)]">
                   {c.title}{" "}
-                  <span className="text-xs text-gray-500">({c.visa_code})</span>
+                  <span className="text-xs text-[var(--text-subtle)]">({c.visa_code})</span>
                 </div>
-                <div className="text-sm">
+                <div className="text-sm text-[var(--text-muted)]">
                   Confiança: {(c.confidence * 100).toFixed(0)}%
                 </div>
                 {c.rationale && (
-                  <p className="text-sm text-gray-700 mt-1">{c.rationale}</p>
+                  <p className="text-sm text-[var(--text-muted)] mt-1">{c.rationale}</p>
                 )}
               </div>
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-600">
+          <p className="text-sm text-[var(--text-muted)]">
             Sem classificação ainda. Clique em <b>Classificar</b>.
           </p>
         )}
       </section>
 
       {/* Perguntas + Respostas */}
-      <section className="border rounded-md p-4">
-        <h2 className="font-medium mb-3">3) Perguntas de validação (5)</h2>
+      <section className="section-card">
+        <h2 className="font-medium mb-3 text-[var(--text-main)]">2) Perguntas de validação</h2>
 
         {hasQuestions ? (
           <>
-            <div className="mb-3">
-              {/* útil para depurar o payload salvo */}
-              <JSONBlock data={sub.followup_questions} collapsed />
-            </div>
-
-            <h3 className="font-medium mb-2">Responda abaixo</h3>
+            <h3 className="font-medium mb-3 text-[var(--text-main)]">Responda abaixo</h3>
             <QuestionsForm
               submissionId={sub.id}
               questions={questions}
               initialAnswers={answers}
             />
-
-            {hasAnswers && (
-              <details className="mt-4">
-                <summary className="cursor-pointer underline text-sm">
-                  Ver respostas salvas
-                </summary>
-                <JSONBlock data={sub.followup_answers} />
-              </details>
-            )}
           </>
         ) : (
-          <p className="text-sm text-gray-600">
+          <p className="text-sm text-[var(--text-muted)]">
             Clique em <b>Gerar 5 perguntas</b> para criar as perguntas.
           </p>
         )}
       </section>
 
-      {/* Finalização */}
-      <section className="border rounded-md p-4">
-        <h2 className="font-medium mb-3">4) Decisão final</h2>
+      {/* Finalização (preenchida automaticamente após enviar as respostas) */}
+      <section id="decisao-final" className="section-card">
+        <h2 className="font-medium mb-3 text-[var(--text-main)]">3) Decisão final</h2>
         <FinalizeButton
           id={sub.id}
           disabledReason={
@@ -225,45 +220,110 @@ export default async function SubmissionPage({
 
         {hasFinal ? (
           <div className="space-y-3 mt-3">
-            <div className="text-sm">
-              <b>Visto selecionado:</b> {sub.final_decision!.selected_visa} —{" "}
-              <b>Confiança:</b>{" "}
-              {(sub.final_decision!.confidence * 100).toFixed(0)}%
-            </div>
-            {sub.final_decision!.rationale && (
-              <p className="text-sm text-gray-700">
-                {sub.final_decision!.rationale}
-              </p>
+            {/* Não se enquadra em nenhum visto (confiança < 40%) */}
+            {sub.final_decision!.qualifies_for_visa === false ? (
+              <>
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+                  <div className="font-medium text-amber-200">Você não se enquadra em nenhum visto no momento</div>
+                  <p className="mt-2 text-sm text-amber-100/90">
+                    Com o perfil atual não há um visto com adequação suficiente. Não estamos apontando nenhum visto específico. Em vez disso, elaboramos um caminho para você se preparar e, no futuro, se qualificar a um visto mais acessível.
+                  </p>
+                </div>
+                {sub.final_decision!.rationale && (
+                  <p className="text-sm text-[var(--text-muted)]">{sub.final_decision!.rationale}</p>
+                )}
+                {sub.final_decision!.path_to_qualify && (
+                  <div className="space-y-2">
+                    <div className="font-medium text-sm text-[var(--text-main)]">Caminho para se qualificar a um visto</div>
+                    <p className="text-sm text-[var(--text-muted)]">{sub.final_decision!.path_to_qualify.summary}</p>
+                    <ul className="list-disc ml-6 text-sm space-y-1 text-[var(--text-muted)]">
+                      {sub.final_decision!.path_to_qualify.steps.map((it, i) => {
+                        const step = typeof it === "string" ? it : it.step;
+                        const url = typeof it === "string" ? null : it.url;
+                        return (
+                          <li key={i}>
+                            {url ? (
+                              <a href={url} target="_blank" rel="noopener noreferrer" className="text-[var(--primary)] hover:underline">
+                                {step}
+                              </a>
+                            ) : (
+                              step
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {/* Os 2 vistos com mais confiança */}
+                {sub.final_decision!.top_visas?.length ? (
+                  <div>
+                    <div className="font-medium text-sm mb-2 text-[var(--text-main)]">Vistos recomendados (maior confiança)</div>
+                    <div className="space-y-2">
+                      {sub.final_decision!.top_visas.map((v, i) => (
+                        <div key={i} className="rounded-lg border border-[var(--border-default)] p-3 bg-[var(--bg-muted)]/50">
+                          <div className="font-medium text-[var(--text-main)]">
+                            {i + 1}º {v.visa} — {(v.confidence * 100).toFixed(0)}% confiança
+                          </div>
+                          {v.rationale && (
+                            <p className="text-sm text-[var(--text-muted)] mt-1">{v.rationale}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-[var(--text-muted)]">
+                    <b className="text-[var(--text-main)]">Visto selecionado:</b> {sub.final_decision!.selected_visa} —{" "}
+                    <b>Confiança:</b>{" "}
+                    {(sub.final_decision!.confidence * 100).toFixed(0)}%
+                  </div>
+                )}
+                {sub.final_decision!.rationale && (
+                  <p className="text-sm text-[var(--text-muted)]">{sub.final_decision!.rationale}</p>
+                )}
+                {sub.final_decision!.action_plan?.length ? (
+                  <div>
+                    <div className="font-medium text-sm mb-2 text-[var(--text-main)]">Plano de ação</div>
+                    <ul className="list-disc ml-6 text-sm space-y-1 text-[var(--text-muted)]">
+                      {sub.final_decision!.action_plan.map((it, i) => {
+                        const step = typeof it === "string" ? it : it.step;
+                        const url = typeof it === "string" ? null : it.url;
+                        return (
+                          <li key={i}>
+                            {url ? (
+                              <a href={url} target="_blank" rel="noopener noreferrer" className="text-[var(--primary)] hover:underline">
+                                {step}
+                              </a>
+                            ) : (
+                              step
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
+                {sub.final_decision!.documents_checklist?.length ? (
+                  <div>
+                    <div className="font-medium text-sm mb-2 text-[var(--text-main)]">Checklist de documentos</div>
+                    <ul className="list-disc ml-6 text-sm text-[var(--text-muted)]">
+                      {sub.final_decision!.documents_checklist.map((it, i) => (
+                        <li key={i}>{it}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </>
             )}
-            {sub.final_decision!.action_plan?.length ? (
-              <div>
-                <div className="font-medium text-sm">Plano de ação</div>
-                <ul className="list-disc ml-6 text-sm">
-                  {sub.final_decision!.action_plan.map((it, i) => (
-                    <li key={i}>{it}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {sub.final_decision!.documents_checklist?.length ? (
-              <div>
-                <div className="font-medium text-sm">Checklist de documentos</div>
-                <ul className="list-disc ml-6 text-sm">
-                  {sub.final_decision!.documents_checklist.map((it, i) => (
-                    <li key={i}>{it}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            <details className="mt-2">
-              <summary className="cursor-pointer underline text-sm">
-                Ver JSON completo
-              </summary>
-              <JSONBlock data={sub.final_decision} />
-            </details>
           </div>
         ) : (
-          <p className="text-sm text-gray-600 mt-2">Ainda sem decisão final.</p>
+          <p className="text-sm text-[var(--text-muted)] mt-2">
+            A decisão final é gerada automaticamente após você enviar as respostas das perguntas.
+          </p>
         )}
       </section>
     </div>

@@ -35,14 +35,14 @@ export default function FinalizeButton({
     <div>
       <button
         onClick={finalize}
-        className="px-4 py-2 rounded-md bg-emerald-600 text-white disabled:opacity-60"
+        className="btn-primary disabled:opacity-60"
         disabled={disabled}
         title={disabledReason ?? "Finalizar decisão"}
       >
         {loading ? "Finalizando..." : "Finalizar decisão"}
       </button>
       {disabledReason && (
-        <p className="text-xs text-gray-600 mt-2">
+        <p className="text-xs text-[var(--text-muted)] mt-2">
           Você precisa concluir: {disabledReason}.
         </p>
       )}

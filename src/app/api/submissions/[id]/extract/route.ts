@@ -1,6 +1,7 @@
 // src/app/api/submissions/[id]/extract/route.ts
 import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
+import { getUserId } from "@/lib/auth";
 import { extractFacts } from "@/domain/services/extract-facts";
 
 // Tune these if you want
@@ -10,14 +11,19 @@ const RETURNING_COLUMNS = `
   followup_answers, final_decision, status, created_at, updated_at
 `;
 
-export async function POST(_req: Request, { params }: { params: { id: string } }) {
+export async function POST(req: Request, { params }: { params: { id: string } }) {
   const id = params.id;
 
+  const userId = await getUserId(req);
+  if (!userId) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
   try {
-    // 1) Load submission
+    // 1) Load submission (apenas do dono)
     const rows = await query<{ id: string; raw_text: string | null }>(
-      `SELECT id, raw_text FROM submissions WHERE id = $1 LIMIT 1`,
-      [id]
+      `SELECT id, raw_text FROM submissions WHERE id = $1 AND user_id = $2 LIMIT 1`,
+      [id, userId]
     );
 
     if (rows.length === 0) {
@@ -62,14 +68,14 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
       );
     }
 
-    // 3) Persist and return updated submission
+    // 3) Persist and return updated submission (só atualiza se for do dono)
     const updated = await query(
       `UPDATE submissions
          SET extracted_facts = $2::jsonb,
              updated_at      = NOW()
-       WHERE id = $1
+       WHERE id = $1 AND user_id = $3
        RETURNING ${RETURNING_COLUMNS}`,
-      [id, JSON.stringify(facts)]
+      [id, JSON.stringify(facts), userId]
     );
 
     return NextResponse.json(updated[0]);

@@ -61,7 +61,8 @@ export default function QuestionsForm({ submissionId, questions, initialAnswers 
       }
 
       setStatus("saved");
-      router.refresh(); // recarrega followup_answers na página
+      router.refresh(); // recarrega e já mostra a decisão final (gerada automaticamente)
+      document.getElementById("decisao-final")?.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err: any) {
       setStatus("error");
       setErrorMsg(err?.message || "Erro ao salvar respostas.");
@@ -74,11 +75,11 @@ export default function QuestionsForm({ submissionId, questions, initialAnswers 
     <form onSubmit={onSubmit} className="space-y-4">
       {questions.map((q, i) => (
         <div key={i} className="space-y-1">
-          <label className="block text-sm font-medium">
+          <label className="block text-sm font-medium text-[var(--text-main)]">
             {i + 1}. {q}
           </label>
           <textarea
-            className="w-full border rounded-md p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="input min-h-[80px] resize-y"
             rows={3}
             value={answers[i] ?? ""}
             onChange={(e) => setAnswerAt(i, e.target.value)}
@@ -87,17 +88,16 @@ export default function QuestionsForm({ submissionId, questions, initialAnswers 
         </div>
       ))}
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="submit"
           disabled={status === "saving"}
-          className="px-4 py-2 rounded-md bg-blue-600 text-white disabled:opacity-60"
+          className="btn-primary disabled:opacity-60"
         >
           {status === "saving" ? "Salvando..." : "Enviar respostas"}
         </button>
-
-        {status === "saved" && <span className="text-green-700 text-sm">Respostas salvas!</span>}
-        {status === "error" && <span className="text-red-700 text-sm">{errorMsg}</span>}
+        {status === "saved" && <span className="text-[var(--success-soft)] text-sm">Respostas salvas!</span>}
+        {status === "error" && <span className="text-[var(--danger)] text-sm">{errorMsg}</span>}
       </div>
     </form>
   );

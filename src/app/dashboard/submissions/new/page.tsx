@@ -1,25 +1,32 @@
 'use client';
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 
+import { useRouter } from 'next/navigation';
+import SubmissionForm from './SubmissionForm';
 
 export default function NewSubmissionPage() {
-const [text, setText] = useState("");
-const router = useRouter();
+  const router = useRouter();
 
+  async function handleSubmit(payload: { rawText: string; applicantName: string; applicantPhone: string }) {
+    const res = await fetch('/api/submissions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rawText: payload.rawText,
+        applicantName: payload.applicantName,
+        applicantPhone: payload.applicantPhone,
+      }),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error ?? 'Erro ao criar submissão.');
+    if (json.id) router.push(`/dashboard/submissions/${json.id}`);
+  }
 
-async function onCreate() {
-const res = await fetch('/api/submissions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rawText: text }) });
-const json = await res.json();
-router.push(`/dashboard/submissions/${json.id}`);
-}
-
-
-return (
-<div>
-<h2 className="text-xl font-medium mb-3">Nova submissão</h2>
-<textarea value={text} onChange={(e)=>setText(e.target.value)} placeholder="Conte sua situação (objetivo, duração, histórico de vistos, emprego/estudos, etc.)" className="w-full h-48 p-3 border rounded mb-3" />
-<button onClick={onCreate} className="px-4 py-2 rounded bg-black text-white">Criar</button>
-</div>
-);
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-semibold text-[var(--text-main)]">Nova submissão</h1>
+      <div className="section-card rounded-xl">
+        <SubmissionForm onSubmit={handleSubmit} />
+      </div>
+    </div>
+  );
 }

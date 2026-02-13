@@ -1,8 +1,22 @@
-// Substitua por Clerk/NextAuth. Aqui um mock para desenvolvimento.
 import { NextRequest } from "next/server";
+import { createServerSupabase } from "@/lib/supabase/server";
+import type { User } from "@supabase/supabase-js";
 
+/**
+ * Retorna o usuário autenticado (Supabase Auth) ou null se não autenticado.
+ */
+export async function getCurrentUser(): Promise<User | null> {
+  const supabase = createServerSupabase();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user ?? null;
+}
 
-export async function getUserId(_req: NextRequest): Promise<string> {
-// Em produção, leia do token/session. Para dev, fixe um id.
-return "dev-user-0001";
+/**
+ * Retorna o ID do usuário autenticado ou null se não autenticado.
+ */
+export async function getUserId(_req?: NextRequest | Request): Promise<string | null> {
+  const user = await getCurrentUser();
+  return user?.id ?? null;
 }

@@ -1,3 +1,155 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ===============================
+   🌐 BASE THEME — VISA SAAS
+   Preto • Azul • Branco • Verde
+================================ */
+
+@layer base {
+  :root {
+    /* Core */
+    --bg-main: #0b0f1a;
+    --bg-surface: #11162a;
+    --bg-muted: #161c33;
+
+    /* Brand */
+    --primary: #2563eb;       /* blue-600 */
+    --primary-dark: #1e40af;  /* blue-800 */
+    --success: #14532d;       /* green-900 */
+    --success-soft: #166534;  /* green-800 */
+
+    /* Text */
+    --text-main: #f8fafc;     /* slate-50 */
+    --text-muted: #cbd5f5;    /* slate-300 */
+    --text-subtle: #94a3b8;   /* slate-400 */
+
+    /* UI */
+    --border-default: #1e293b;
+    --border-focus: #2563eb;
+    --danger: #dc2626;
+  }
+
+  html,
+  body {
+    @apply bg-[color:var(--bg-main)] text-[color:var(--text-main)] antialiased;
+    font-feature-settings: "ss01" on, "cv01" on;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-semibold tracking-tight;
+  }
+
+  p {
+    @apply text-[color:var(--text-muted)];
+  }
+
+  a {
+    @apply text-[color:var(--primary)] hover:underline;
+  }
+}
+
+/* ===============================
+   🧱 COMPONENTS
+================================ */
+
+@layer components {
+  /* Cards / Containers */
+  .card {
+    @apply bg-[color:var(--bg-surface)]
+           border border-[color:var(--border-default)]
+           rounded-xl
+           shadow-lg
+           p-6;
+  }
+
+  /* Primary Button */
+  .btn-primary {
+    @apply inline-flex items-center justify-center
+           rounded-lg px-5 py-2.5
+           bg-[color:var(--primary)]
+           text-white font-medium
+           transition
+           hover:bg-[color:var(--primary-dark)]
+           focus:outline-none focus:ring-2
+           focus:ring-[color:var(--border-focus)];
+  }
+
+  /* Secondary Button */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center
+           rounded-lg px-5 py-2.5
+           bg-transparent
+           border border-[color:var(--border-default)]
+           text-[color:var(--text-main)]
+           hover:bg-[color:var(--bg-muted)];
+  }
+
+  /* Success Badge */
+  .badge-success {
+    @apply inline-flex items-center
+           rounded-full px-3 py-1
+           text-sm font-medium
+           bg-[color:var(--success)]
+           text-white;
+  }
+
+  /* Input */
+  .input {
+    @apply w-full
+           rounded-lg
+           bg-[color:var(--bg-muted)]
+           border border-[color:var(--border-default)]
+           px-4 py-2
+           text-[color:var(--text-main)]
+           placeholder:text-[color:var(--text-subtle)]
+           focus:outline-none
+           focus:ring-2
+           focus:ring-[color:var(--border-focus)];
+  }
+
+  /* Divider */
+  .divider {
+    @apply border-t border-[color:var(--border-default)] my-6;
+  }
+}
+
+/* ===============================
+   ✨ UTILITIES
+================================ */
+
+@layer utilities {
+  .glass {
+    backdrop-filter: blur(10px);
+    background: rgba(17, 22, 42, 0.75);
+  }
+
+  .text-gradient {
+    background: linear-gradient(90deg, #2563eb, #22c55e);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* App container: max-width + responsive padding */
+  .container-app {
+    width: 100%;
+    max-width: 56rem; /* 896px */
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+  @media (min-width: 640px) {
+    .container-app { padding-left: 1.5rem; padding-right: 1.5rem; }
+  }
+  @media (min-width: 1024px) {
+    .container-app { padding-left: 2rem; padding-right: 2rem; }
+  }
+
+  /* Section spacing */
+  .section-card {
+    @apply rounded-xl border border-[color:var(--border-default)] bg-[color:var(--bg-surface)] p-4 sm:p-5 shadow-sm;
+  }
+}

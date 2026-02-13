@@ -5,67 +5,110 @@ import {
   type VisaCandidates,
   type VisaCandidate,
 } from "@/domain/schemas/visa-candidates.schema";
+
+/** Formato interno antes do parse (sem known/label). */
+type VisaCandidateRaw = { visa: string; confidence: number; rationale: string };
 import type { ExtractFacts } from "@/domain/schemas/extract-facts.schema";
 
-/** ===== modelo / temperatura ===== */
+/** ===== model / temperature ===== */
 function resolveModel(): string {
   const m = process.env.OPENAI_MODEL?.trim();
   return m && m.length > 0 ? m : "gpt-5";
 }
 function supportsTemperature(model: string): boolean {
-  // Modelos gpt-5* normalmente rejeitam temperature != default
+  // gpt-5* geralmente só aceita temperatura default
   return !/^gpt-5\b/i.test(model);
 }
 
+/** ===== tamanho da resposta ===== */
+function resolveReturnCount(): number {
+  const n = Number(process.env.CLASSIFY_RETURN_COUNT ?? 6);
+  return Math.min(Math.max(1, Math.floor(n)), 30); // 1..30 (padrão 6)
+}
+
+/** ===== regras sobre sponsor ===== */
+const SPONSOR_REQUIRED = new Set([
+  // Work/Temp que pedem petitioner/employer/agent
+  "H1B","H2A","H2B","H3","O1","O2","P1","P2","P3","P4","R1","Q1","TN","E3","L1","J1",
+  // Employment-based immigrant com PERM/employer
+  "EB1B","EB1C","EB2_PERM","EB3",
+  // Family-based
+  "FAMILY","IR1","CR1","K1","K3","V","F1_FAMILY","F2_FAMILY","F3_FAMILY","F4_FAMILY",
+]);
+function isSponsorRequired(code: string): boolean {
+  return SPONSOR_REQUIRED.has(code.toUpperCase());
+}
+
+/** Sugere categorias de visto mais relevantes dado o purpose (evita desperdício de slots). */
+function purposeToRelevantVisas(purpose: string | null | undefined): string[] {
+  const p = (purpose ?? "").toLowerCase();
+  if (p === "study") return ["F1", "M1", "J1", "B2", "F1_FAMILY"];
+  if (p === "work") return ["EB2_NIW", "O1", "H1B", "L1", "EB1A", "EB2_PERM", "EB3", "E2", "TN", "E3", "B1"];
+  if (p === "business") return ["E1", "E2", "B1", "L1", "EB5", "O1", "H1B"];
+  if (p === "tourism") return ["B2", "B1", "F1_FAMILY"];
+  if (p === "immigration") return ["EB2_NIW", "EB5", "EB1A", "DV", "FAMILY", "IR1", "CR1", "EB2_PERM", "EB3", "E2"];
+  return [];
+}
+
 /** ===== API ===== */
-/**
- * Classificador de vistos que SEMPRE devolve 5 candidatos.
- * - Normaliza nomes livres (ex.: "EB-2 NIW") para códigos canônicos (ex.: "EB2_NIW").
- * - Garante visa não-vazio, confidence em 0..1, remove duplicados, ordena e preenche até 10.
- * - selected = topo por confiança; mantém se vier válido do modelo.
- */
 export async function classifyVisa(facts: ExtractFacts): Promise<VisaCandidates> {
-  const purpose = `${facts?.purpose ?? ""}`.toLowerCase();
+  const COUNT = resolveReturnCount();
+  const purposeHint = purposeToRelevantVisas(facts?.purpose);
 
   const system = [
-    "Você é um sistema de classificação de vistos dos EUA.",
-    "Responda APENAS em JSON válido, sem explicações nem texto extra.",
-    "Formato OBRIGATÓRIO do objeto:",
-    "{",
-    '  "candidates": [ { "visa": string, "confidence": number, "rationale": string? }, ... ],',
-    '  "selected": string?',
-    "}",
-    "Regras:",
-    "- Devolva EXATAMENTE 10 itens em 'candidates'.",
-    '- Cada item DEVE ter "visa" não vazio (ex.: "B1", "B2", "F1", "H1B", "EB2_NIW", "EB1A" etc.).',
-    "- 'confidence' deve estar em 0..1 (ex.: 0.83).",
-    "- 'selected' (se presente) DEVE ser um dos 'visa' listados em 'candidates' e preferencialmente o de maior confiança.",
+    "Você é um classificador de vistos dos EUA. Sua saída é usada para sugerir vistos e gerar perguntas. APONTE APENAS VISTOS QUE FAÇAM SENTIDO para o perfil e o propósito da pessoa.",
+    "",
+    "REGRAS OBRIGATÓRIAS:",
+    "1. Base a classificação APENAS nos fatos extraídos (personal, purpose, education, work_experience_years, has_us_sponsor, signals). Não invente dados.",
+    "2. INCLUA SOMENTE vistos coerentes com o purpose e o perfil:",
+    "   - purpose=tourism → apenas B2, B1 (e B1 só se houver motivo de negócios). NUNCA sugira EB5, H1B, F1, etc.",
+    "   - purpose=study → F1, M1, J1, B2. NUNCA sugira vistos de trabalho permanente ou investimento.",
+    "   - purpose=business → B1, E1, E2, L1 (se multinacional). EB5 só se houver sinal de investimento. Evite vistos de imigração familiar.",
+    "   - purpose=work → H1B, L1, O1, E2, TN, E3, EB2_NIW, EB1A, EB2_PERM, EB3. Só inclua H1B/EB2_PERM/EB3 se houver oferta de emprego ou forte perfil; EB2_NIW/EB1A/E2 para quem não tem sponsor.",
+    "   - purpose=immigration → EB2_NIW, EB1A, EB5, DV, E2, FAMILY, IR1, CR1, K1, EB2_PERM, EB3. Priorize conforme sinais: família nos EUA → FAMILY/IR1/CR1/K1; investimento → EB5/E2; sem sponsor → EB2_NIW/EB1A/DV/E2.",
+    "3. NÃO inclua vistos claramente irrelevantes (ex.: DV para quem não tem país de chargeability elegível; IR1/CR1 sem cônjuge cidadão; L1 sem experiência em multinacional).",
+    "4. Para cada candidato, 'rationale' deve citar fatos que apoiam ou enfraquecem. confidence (0..1): quão bem os fatos preenchem o visto. Dados faltando = menor confiança.",
+    "5. Priorize no topo vistos que NÃO exigem patrocinador quando os fatos permitirem. Marque vistos que exigem sponsor com '(requires sponsor)' na rationale.",
+    "",
+    "FORMATO (somente JSON):",
+    '{ "candidates": [ { "visa": "CODIGO", "confidence": 0.0 a 1.0, "rationale": "CODIGO — justificativa com base nos fatos" }, ... ], "selected": "CODIGO" }',
+    "",
+    "CÓDIGOS VÁLIDOS (use exatamente): B1, B2, F1, M1, J1, H1B, H2A, H2B, H3, L1, O1, O2, E1, E2, TN, E3, P1-P4, R1, Q1, I, U, T, K1, K3, V, IR1, CR1, F1_FAMILY-F4_FAMILY, FAMILY, EB1A, EB1B, EB1C, EB2_NIW, EB2_PERM, EB3, EB4, EB5, DV.",
+    `- Retorne EXATAMENTE ${COUNT} candidatos, TODOS coerentes com purpose e perfil. Ordenados por relevância/confiança.`,
+    "- 'selected' = o visto mais recomendado (geralmente o primeiro).",
   ].join("\n");
 
   const user = {
     extracted_facts: facts,
-    goal:
-      "Classificar os melhores tipos de visto para o caso, com justificativa e confiança. Retorne exatamente 5 candidatos e retorne visto no comeco da explicacao.",
+    purpose: facts?.purpose ?? null,
+    signals: facts?.signals ?? undefined,
+    relevant_visas_hint: purposeHint.length > 0 ? purposeHint : undefined,
+    instruction: `Classifique APENAS vistos que façam sentido para o purpose e o perfil. ${purposeHint.length > 0 ? `Priorize entre: ${purposeHint.join(", ")}; inclua outros só se os fatos justificarem.` : ""} NÃO sugira vistos irrelevantes (ex.: turismo → só B2/B1). Retorne exatamente ${COUNT} candidatos em JSON. Inicie cada rationale com "CODIGO — ". Marque "(requires sponsor)" quando o visto exigir patrocinador.`,
   };
 
   const model = resolveModel();
-  const temp = supportsTemperature(model) ? 0.2 : undefined;
+  const temp = supportsTemperature(model) ? 0.15 : undefined;
 
   const raw = await callJSON<unknown>({
     system,
     user,
     model,
     ...(typeof temp === "number" ? { temperature: temp } : {}),
-    validate: (data) => sanitizeCandidatesLike(data, purpose),
+    validate: (data) => sanitizeCandidatesLike(data, COUNT),
     verboseLog: process.env.NODE_ENV !== "production",
-    timeoutMs: Number(process.env.AI_TIMEOUT_CLASSIFY_MS ?? 90_000),
+    timeoutMs: Number(process.env.AI_TIMEOUT_CLASSIFY_MS ?? 120_000),
     maxRetries: 0,
   });
 
   const parsed = VisaCandidatesSchema.parse(raw);
-  const finalized = finalizeSelection(parsed);
 
-  // Opcional: garantir confiança >= 0.80 no topo (ativado por padrão)
+  // Reordenar: independentes primeiro, patrocinados no fim
+  const reordered = reorderBySponsor(parsed, COUNT);
+
+  // Garantir selected coerente
+  const finalized = finalizeSelection(reordered);
+
+  // Opcional: força >=0.80 no topo (configurável)
   const require80 = String(process.env.CLASSIFY_REQUIRE_TOP80 ?? "true").toLowerCase() !== "false";
   if (require80 && finalized.candidates[0] && (finalized.candidates[0].confidence ?? 0) < 0.8) {
     finalized.candidates[0].confidence = 0.8;
@@ -74,62 +117,137 @@ export async function classifyVisa(facts: ExtractFacts): Promise<VisaCandidates>
   return finalized;
 }
 
-/** ===== seleção coerente ===== */
-function finalizeSelection(data: VisaCandidates): VisaCandidates {
-  if (!data.candidates?.length) return { candidates: [], selected: undefined };
-  const hasSelected =
-    data.selected && data.candidates.some((c) => c.visa === data.selected);
-  if (hasSelected) return data;
+/** ===== reorder: independentes primeiro, sponsor no fim ===== */
+function reorderBySponsor(data: VisaCandidates, max: number): VisaCandidates {
+  const arr = Array.isArray(data.candidates) ? data.candidates.slice(0, max) : [];
+  const independents: VisaCandidate[] = [];
+  const sponsored: VisaCandidate[] = [];
 
-  const top = [...data.candidates].sort(
-    (a, b) => (b.confidence ?? 0) - (a.confidence ?? 0)
-  )[0];
-  return { candidates: data.candidates, selected: top?.visa };
+  for (const c of arr) {
+    if (isSponsorRequired(c.visa)) {
+      const hasTag = (c.rationale ?? "").toLowerCase().includes("requires sponsor");
+      const tag: string = hasTag
+        ? (c.rationale ?? "(requires sponsor)")
+        : c.rationale
+          ? `${c.rationale} (requires sponsor)`
+          : "(requires sponsor)";
+      sponsored.push({ ...c, rationale: tag });
+    } else {
+      independents.push(c);
+    }
+  }
+
+  independents.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  sponsored.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+
+  const candidates = [...independents, ...sponsored].slice(0, max);
+  return { candidates, selected: data.selected };
 }
 
-/* ===== Normalização de códigos ===== */
+/** ===== seleção ===== */
+function finalizeSelection(data: VisaCandidates): VisaCandidates {
+  if (!data.candidates?.length) {
+    return { candidates: [], selected: "" };
+  }
+  const hasSelected = data.selected && data.candidates.some((c) => c.visa === data.selected);
+  if (hasSelected) return data;
+  const top = [...data.candidates].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0];
+  return { candidates: data.candidates, selected: top?.visa ?? "" };
+}
+
+/* ===== Normalização ===== */
 
 function stripDiacritics(input: string): string {
   return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
+type MapRow = { re: RegExp; code: string };
+
+/** Catálogo amplo para normalizar rótulos livres do modelo */
+const TABLE: MapRow[] = [
+  // Visitor
+  { re: /\bb[-\s_]?1\b(?!.*b[-\s_]?2)|\bb1\b|business visitor/, code: "B1" },
+  { re: /\bb[-\s_]?2\b|\bb2\b|tourist|visitor\b(?!.*business)/, code: "B2" },
+
+  // Students / Exchange
+  { re: /\bf[-\s_]?1\b|\bf1\b|academic student|i-20|i20/, code: "F1" },
+  { re: /\bm[-\s_]?1\b|\bm1\b|vocational student/, code: "M1" },
+  { re: /\bj[-\s_]?1\b|\bj1\b|exchange visitor|ds-2019|ds2019/, code: "J1" },
+
+  // H set
+  { re: /\bh[-\s_]?1b\b|\bh1b\b|specialty occupation/, code: "H1B" },
+  { re: /\bh[-\s_]?2a\b|\bh2a\b/, code: "H2A" },
+  { re: /\bh[-\s_]?2b\b|\bh2b\b/, code: "H2B" },
+  { re: /\bh[-\s_]?3\b|\bh3\b/, code: "H3" },
+
+  // L/O/P/TN/E/I/R/Q
+  { re: /\bl[-\s_]?1\b|\bl1\b|intracompany transfer/, code: "L1" },
+  { re: /\bo[-\s_]?1\b|\bo1\b|extraordinary ability.*(nonimmig|temporary)?/, code: "O1" },
+  { re: /\bo[-\s_]?2\b|\bo2\b/, code: "O2" },
+  { re: /\bp[-\s_]?1\b|\bp1\b|athlete|entertainment team/, code: "P1" },
+  { re: /\bp[-\s_]?2\b|\bp2\b/, code: "P2" },
+  { re: /\bp[-\s_]?3\b|\bp3\b/, code: "P3" },
+  { re: /\bp[-\s_]?4\b|\bp4\b/, code: "P4" },
+  { re: /\btn\b|usmca/, code: "TN" },
+  { re: /\be[-\s_]?3\b|\be3\b|australian specialty occupation/, code: "E3" },
+  { re: /\be[-\s_]?1\b|\be1\b|treaty trader/, code: "E1" },
+  { re: /\be[-\s_]?2\b|\be2\b|treaty investor|investidor tratado/, code: "E2" },
+  { re: /\bmedia\b|press|journalist\b|\bi\b(?![-\s_]?140)/, code: "I" },
+  { re: /\br[-\s_]?1\b|\br1\b|religious worker/, code: "R1" },
+  { re: /\bq[-\s_]?1\b|\bq1\b|cultural exchange/, code: "Q1" },
+
+  // Humanitarian / victims
+  { re: /\bu\b(?![-\s_]?s|scis|scis)|u[-\s_]?visa|victim of crime/, code: "U" },
+  { re: /\bt\b(?![-\s_]?p|ps)|t[-\s_]?visa|traffick/, code: "T" },
+
+  // Fiancé / family NIV-like
+  { re: /\bk[-\s_]?1\b|\bk1\b|fiance/i, code: "K1" },
+  { re: /\bk[-\s_]?3\b|\bk3\b/, code: "K3" },
+  { re: /\bv\b(?=\b|[-_])/, code: "V" },
+
+  // Family-based IV
+  { re: /\bir[-\s_]?1\b|\bcr[-\s_]?1\b|spouse of us citizen|c[oô]njuge.*cidad[aã]o/, code: "IR1" },
+  { re: /\bcr[-\s_]?1\b/, code: "CR1" },
+  { re: /\bf1 family\b|family preference 1|unmarried sons daughters citizens/, code: "F1_FAMILY" },
+  { re: /\bf2 family\b|spouses children of lpr/, code: "F2_FAMILY" },
+  { re: /\bf3 family\b|married sons daughters citizens/, code: "F3_FAMILY" },
+  { re: /\bf4 family\b|siblings of citizens/, code: "F4_FAMILY" },
+
+  // Employment-based IV
+  { re: /\beb[-\s_]?1a\b|extraordinary ability.*(immigrant|green card)|eb1a/, code: "EB1A" },
+  { re: /\beb[-\s_]?1b\b|outstanding researcher|eb1b/, code: "EB1B" },
+  { re: /\beb[-\s_]?1c\b|multinational manager|eb1c/, code: "EB1C" },
+  { re: /\beb[-\s_]?2\s*niw\b|(?:^|\b)niw\b|national interest waiver|eb2[-\s_]?niw/, code: "EB2_NIW" },
+  { re: /\beb[-\s_]?2\b(?!.*niw)|eb2 perm|perm.*eb[-\s_]?2|eb[-\s_]?2.*perm|i[-\s_]?140.*eb[-\s_]?2/, code: "EB2_PERM" },
+  { re: /\beb[-\s_]?3\b|skilled|professional|other worker|eb3/, code: "EB3" },
+  { re: /\beb[-\s_]?4\b|special immigrant|religious.*immigrant/, code: "EB4" },
+  { re: /\beb[-\s_]?5\b|investor.*(immigrant|green card)|regional center/, code: "EB5" },
+
+  // Diversity
+  { re: /\bdv\b|diversity(?: |-)?visa|lottery|loteria/, code: "DV" },
+
+  // Bucket genérico de família
+  { re: /family[-\s_]?based|c[oô]njuge|espos[ao]|filh[oa]|irma[oa]|parente/, code: "FAMILY" },
+];
+
+const KNOWN = new Set([
+  "B1","B2",
+  "F1","M1","J1",
+  "H1B","H2A","H2B","H3",
+  "L1","O1","O2","P1","P2","P3","P4","TN","E3","E1","E2","I","R1","Q1",
+  "U","T",
+  "K1","K3","V",
+  "IR1","CR1","F1_FAMILY","F2_FAMILY","F3_FAMILY","F4_FAMILY","FAMILY",
+  "EB1A","EB1B","EB1C","EB2_NIW","EB2_PERM","EB3","EB4","EB5",
+  "DV",
+]);
 
 function normalizeVisaToCode(raw: unknown): { code: string | null } {
   if (typeof raw !== "string") return { code: null };
   const s = raw.trim();
   if (!s) return { code: null };
-
   const folded = stripDiacritics(s.toLowerCase());
 
-  const table: Array<{ re: RegExp; code: string }> = [
-    { re: /\beb[-\s_]?1a\b|extraordinary ability|eb1a/, code: "EB1A" },
-    { re: /\beb[-\s_]?1b\b|outstanding researcher|eb1b/, code: "EB1B" },
-    { re: /\beb[-\s_]?2\s*niw\b|(?:^|\b)niw\b|national interest waiver|eb2[-\s_]?niw/, code: "EB2_NIW" },
-    { re: /\beb[-\s_]?2\b(?!.*niw)|eb2 perm|perm.*eb[-\s_]?2|eb[-\s_]?2.*perm/, code: "EB2_PERM" },
-    { re: /\beb[-\s_]?3\b|skilled|professional|eb3/, code: "EB3" },
-    { re: /\beb[-\s_]?5\b|investor|eb5/, code: "EB5" },
-    { re: /\b(ir|cr)\b|family[-\s_]?based|conjuge|c[oô]njuge|espos[ao]|familia/, code: "FAMILY" },
-    { re: /\bdv\b|diversity(?: |-)?visa|loteria/, code: "DV" },
-    { re: /\bh[-\s_]?1b\b|h1b/, code: "H1B" },
-    { re: /\bo[-\s_]?1\b|o1/, code: "O1" },
-    { re: /\bl[-\s_]?1\b|l1/, code: "L1" },
-    { re: /\bf[-\s_]?1\b|f1/, code: "F1" },
-    { re: /\bm[-\s_]?1\b|m1/, code: "M1" },
-    { re: /\bj[-\s_]?1\b|j1/, code: "J1" },
-    { re: /\bb[-\s_]?1\b(?!.*b[-\s_]?2)|\bb1\b/, code: "B1" },
-    { re: /\bb[-\s_]?2\b|\bb2\b/, code: "B2" },
-    { re: /\btn\b/, code: "TN" },
-    { re: /\be[-\s_]?2\b|\be2\b|tratado de investimento|investidor tratado/, code: "E2" },
-    { re: /\be[-\s_]?1\b|\be1\b/, code: "E1" },
-  ];
-
-  for (const row of table) {
-    if (row.re.test(folded)) return { code: row.code };
-  }
-
-  const KNOWN = new Set([
-    "EB1A","EB1B","EB2_NIW","EB2_PERM","EB3","EB5","FAMILY","DV",
-    "H1B","O1","L1","F1","M1","J1","B1","B2","TN","E1","E2",
-  ]);
+  for (const row of TABLE) if (row.re.test(folded)) return { code: row.code };
 
   const direct = s.toUpperCase();
   if (KNOWN.has(direct)) return { code: direct };
@@ -140,38 +258,49 @@ function normalizeVisaToCode(raw: unknown): { code: string | null } {
   return { code: null };
 }
 
-/** ===== normalização pós-modelo ===== */
-function sanitizeCandidatesLike(input: unknown, purpose: string): VisaCandidates {
+/** ===== sanitize (SEM FALLBACKS) ===== */
+function sanitizeCandidatesLike(
+  input: unknown,
+  count: number
+): { candidates: VisaCandidateRaw[]; selected?: string } {
   const obj = isObj(input) ? (input as any) : {};
   const inArr: unknown[] = Array.isArray(obj.candidates) ? obj.candidates : [];
 
-  const cleaned: VisaCandidate[] = inArr
-    .map((item) => {
+  const cleaned: VisaCandidateRaw[] = inArr
+    .map((item): VisaCandidateRaw | null => {
       const { code } = normalizeVisaToCode((item as any)?.visa);
       if (!code) return null;
+
+      let rationale = toStrOpt((item as any)?.rationale);
+      if (!rationale || rationale.trim().length === 0) rationale = code;
+      // Garante início com "CODE — ..."
+      if (!rationale.trim().toUpperCase().startsWith(code)) {
+        rationale = `${code} — ${rationale}`;
+      }
+
       const confidence = toConfidence((item as any)?.confidence);
-      const rationale = toStrOpt((item as any)?.rationale);
       return { visa: code, confidence, rationale };
     })
-    .filter((x): x is VisaCandidate => !!x);
+    .filter((x): x is VisaCandidateRaw => x != null);
 
-  const uniq = dedupeByVisa(cleaned);
-  uniq.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  // Remove duplicados e ordena
+  const uniq = dedupeByVisaRaw(cleaned).sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
 
-  const filled = padToTen(uniq, purpose);
+  // Corta para o tamanho pedido — SEM completar via fallback
+  const trimmed = uniq.slice(0, count);
 
   const selected =
-    isNonEmptyString(obj.selected) && filled.some((c) => c.visa === obj.selected)
+    isNonEmptyString(obj.selected) && trimmed.some((c) => c.visa === obj.selected)
       ? obj.selected
-      : filled[0]?.visa;
+      : trimmed[0]?.visa;
 
-  return { candidates: filled.slice(0, 10), selected };
+  return { candidates: trimmed, selected };
 }
 
 /** ===== helpers ===== */
-function dedupeByVisa(arr: VisaCandidate[]): VisaCandidate[] {
+function dedupeByVisaRaw(arr: VisaCandidateRaw[]): VisaCandidateRaw[] {
   const seen = new Set<string>();
-  const out: VisaCandidate[] = [];
+  const out: VisaCandidateRaw[] = [];
   for (const c of arr) {
     const key = c.visa.toUpperCase();
     if (seen.has(key)) continue;
@@ -181,91 +310,6 @@ function dedupeByVisa(arr: VisaCandidate[]): VisaCandidate[] {
   return out;
 }
 
-type Fallback = { visa: string; confidence: number; rationale?: string };
-
-const FALLBACKS_BY_PURPOSE: Record<string, Fallback[]> = {
-  immigration: [
-    { visa: "EB2_NIW", confidence: 0.62, rationale: "Autopetição com mérito/benefício nacional." },
-    { visa: "EB2_PERM", confidence: 0.56, rationale: "Oferta + PERM; bacharel + experiência." },
-    { visa: "EB3", confidence: 0.5, rationale: "Oferta + PERM para função qualificada/profissional." },
-    { visa: "EB1A", confidence: 0.45, rationale: "Habilidade extraordinária; alto nível de evidências." },
-    { visa: "EB1B", confidence: 0.4, rationale: "Pesquisador/professor destacado." },
-    { visa: "EB5", confidence: 0.35, rationale: "Residência por investimento; origem lícita dos fundos." },
-    { visa: "FAMILY", confidence: 0.3, rationale: "Base familiar (IR/CR) quando aplicável." },
-    { visa: "DV", confidence: 0.2, rationale: "Loteria de diversidade — depende de elegibilidade anual." },
-    { visa: "O1", confidence: 0.28, rationale: "Temporário; ponte para EB1A/EB2 em alguns casos." },
-    { visa: "L1", confidence: 0.22, rationale: "Transferência intraempresa, se aplicável." },
-  ],
-  study: [
-    { visa: "F1", confidence: 0.7, rationale: "Acadêmico com I-20, vínculos e funding." },
-    { visa: "M1", confidence: 0.4, rationale: "Vocacional/técnico." },
-    { visa: "J1", confidence: 0.35, rationale: "Intercâmbio/treinamento com sponsor." },
-    { visa: "B2", confidence: 0.25, rationale: "Cursos recreativos de curta duração." },
-    { visa: "H1B", confidence: 0.2, rationale: "Trabalho em ocupação especializada (futuro)." },
-    { visa: "O1", confidence: 0.18 },
-    { visa: "B1", confidence: 0.15 },
-    { visa: "E2", confidence: 0.14 },
-    { visa: "TN", confidence: 0.12 },
-    { visa: "L1", confidence: 0.1 },
-  ],
-  work: [
-    { visa: "H1B", confidence: 0.62, rationale: "Grau superior/área especializada + empregador." },
-    { visa: "L1", confidence: 0.45, rationale: "Transferência multinacional." },
-    { visa: "O1", confidence: 0.4, rationale: "Habilidade extraordinária; sem cap anual." },
-    { visa: "TN", confidence: 0.35 },
-    { visa: "E2", confidence: 0.3 },
-    { visa: "E1", confidence: 0.25 },
-    { visa: "J1", confidence: 0.2 },
-    { visa: "B1", confidence: 0.18 },
-    { visa: "B2", confidence: 0.12 },
-    { visa: "EB2_NIW", confidence: 0.2 },
-  ],
-  business: [
-    { visa: "B1", confidence: 0.7, rationale: "Reuniões, conferências, prospecção (sem trabalho nos EUA)." },
-    { visa: "E1", confidence: 0.35 },
-    { visa: "E2", confidence: 0.32 },
-    { visa: "O1", confidence: 0.25 },
-    { visa: "B2", confidence: 0.2 },
-    { visa: "H1B", confidence: 0.18 },
-    { visa: "L1", confidence: 0.16 },
-    { visa: "TN", confidence: 0.14 },
-    { visa: "F1", confidence: 0.12 },
-    { visa: "DV", confidence: 0.1 },
-  ],
-  tourism: [
-    { visa: "B2", confidence: 0.75, rationale: "Visita/lazer/saúde; sem estudo com crédito ou trabalho." },
-    { visa: "B1", confidence: 0.35 },
-    { visa: "F1", confidence: 0.2 },
-    { visa: "J1", confidence: 0.18 },
-    { visa: "M1", confidence: 0.16 },
-    { visa: "H1B", confidence: 0.14 },
-    { visa: "O1", confidence: 0.12 },
-    { visa: "TN", confidence: 0.1 },
-    { visa: "E2", confidence: 0.1 },
-    { visa: "DV", confidence: 0.08 },
-  ],
-};
-
-function padToTen(arr: VisaCandidate[], purpose: string): VisaCandidate[] {
-  const out = [...arr];
-  const pool = FALLBACKS_BY_PURPOSE[purpose] || FALLBACKS_BY_PURPOSE["immigration"];
-
-  for (const fb of pool) {
-    if (out.length >= 10) break;
-    if (out.some((c) => c.visa === fb.visa)) continue;
-    out.push({ visa: fb.visa, confidence: clamp01(fb.confidence), rationale: fb.rationale });
-  }
-
-  // Se ainda tiver <10, duplica cauda com leve decaimento
-  while (out.length < 10 && out.length > 0) {
-    const c = out[out.length - 1];
-    out.push({ ...c, confidence: Math.max(0.1, (c.confidence ?? 0) * 0.95) });
-  }
-
-  return out.slice(0, 10);
-}
-
-/** ===== minis ===== */
 function isObj(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }

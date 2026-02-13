@@ -4,7 +4,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 
-type Step = "extract" | "classify" | "questions";
+type Step = "classify" | "questions";
 
 export default function PipelineButtons({ id }: { id: string }) {
   const router = useRouter();
@@ -51,33 +51,22 @@ export default function PipelineButtons({ id }: { id: string }) {
   return (
     <div className="flex flex-wrap gap-2">
       <button
-        onClick={() => hit("extract")}
-        className="px-3 py-1 rounded bg-black text-white disabled:opacity-60"
-        disabled={disabled}
-        aria-busy={busy === "extract"}
-        title="Extrai fatos do texto enviado"
-      >
-        {busy === "extract" ? "Extraindo..." : "1) Extrair fatos"}
-      </button>
-
-      <button
         onClick={() => hit("classify")}
-        className="px-3 py-1 rounded bg-black text-white disabled:opacity-60"
+        className="btn-primary disabled:opacity-60"
         disabled={disabled}
         aria-busy={busy === "classify"}
         title="Classifica o caso em possíveis vistos"
       >
-        {busy === "classify" ? "Classificando..." : "2) Classificar"}
+        {busy === "classify" ? "Classificando..." : "1) Classificar"}
       </button>
-
       <button
         onClick={() => hit("questions")}
-        className="px-3 py-1 rounded bg-black text-white disabled:opacity-60"
+        className="btn-primary disabled:opacity-60"
         disabled={disabled}
         aria-busy={busy === "questions"}
         title="Gera 5 perguntas de validação"
       >
-        {busy === "questions" ? "Gerando..." : "3) Gerar 5 perguntas"}
+        {busy === "questions" ? "Gerando..." : "2) Gerar 5 perguntas"}
       </button>
     </div>
   );
